@@ -95,11 +95,11 @@ int valuta_allarme(double drift_max, const char *tipologia, int n_piani) {
     
     if (prob_cds >= prob_thresh[2]) {
         printf("\n*** ALLARME ROSSO ***\n");
-        printf("DANNO COMPLETO PROBABILE\n");
+        printf("DANNO COMPLETO\n");
         allarme = 3;
     } else if (prob_eds >= prob_thresh[1]) {
         printf("\n*** ALLARME ROSSO ***\n");
-        printf("DANNO ESTESO PROBABILE\n");
+        printf("DANNO ESTESO\n");
         allarme = 2;
     } else if (prob_mds >= prob_thresh[0]) {
         printf("\n*** ALLARME ROSSO ***\n");
@@ -107,7 +107,7 @@ int valuta_allarme(double drift_max, const char *tipologia, int n_piani) {
         allarme = 1;
     } else {
         printf("\n*** NESSUN ALLARME ***\n");
-        printf("Probabilità danno sotto soglia\n");
+        printf("Probabilitaaa danno sotto soglia\n");
     }
     
     return allarme;

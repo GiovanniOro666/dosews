@@ -120,7 +120,7 @@ int main(int argc, char *argv[]) {
         
         printf("Prima integrazione: acc -> vel...\n");
         integra_trapezi(&acc_filt[trigger_idx], vel, n_post_trigger, dt);
-        rimuovi_trend_lineare(vel, n_post_trigger);
+        // rimuovi_trend_lineare(vel, n_post_trigger);
 
         printf("Applicazione filtro passa-banda su velocità...\n");
         double *vel_filt = (double*)malloc(n_post_trigger * sizeof(double));
@@ -133,11 +133,11 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         filtro_bandpass(vel, vel_filt, n_post_trigger, a0, a1, a2, b1, b2);
-        rimuovi_trend_lineare(vel_filt, n_post_trigger);
+        // rimuovi_trend_lineare(vel_filt, n_post_trigger);
 
         printf("Seconda integrazione: vel_filt -> disp...\n");
         integra_trapezi(vel_filt, disp, n_post_trigger, dt);
-        rimuovi_trend_lineare(disp, n_post_trigger);
+        // rimuovi_trend_lineare(disp, n_post_trigger);
         
         printf("Salvataggio velocità e spostamenti...\n");
         if (salva_integrazioni("integrazioni.txt", vel_filt, disp, n_post_trigger) == 0) {
