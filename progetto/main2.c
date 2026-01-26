@@ -7,19 +7,11 @@
 #define LTA_SEC 6.0
 #define THRESHOLD 4.0
 
-void calcola_coeff_lowpass(double fs, double fc,
-                           double *a0, double *a1, double *a2,
-                           double *b1, double *b2);
-
-void calcola_coeff_highpass(double fs, double fc,
+void calcola_coeff_bandpass(double fs, double f_low, double f_high,
                             double *a0, double *a1, double *a2,
                             double *b1, double *b2);
 
-void filtro_lowpass(const double *in, double *out, int n,
-                    double a0, double a1, double a2,
-                    double b1, double b2);
-
-void filtro_highpass(const double *in, double *out, int n,
+void filtro_bandpass(const double *in, double *out, int n,
                      double a0, double a1, double a2,
                      double b1, double b2);
 
@@ -31,8 +23,6 @@ int salva_accelerazioni_filtrate(const char *filename, const double *acc_filtrat
 
 void integra_trapezi(const double *in, double *out, int n, double dt);
 
-void rimuovi_trend_lineare(double *data, int n);
-
 int salva_integrazioni(const char *filename, const double *vel, 
                        const double *disp, int n);
 
@@ -40,8 +30,6 @@ int valuta_allarme(double drift_max, const char *tipologia, int n_piani,
                    int trigger_idx, int allarme_idx, int picco_idx, double fs);
 
 int valuta_allarme_istantaneo(double drift_corrente, const char *tipologia, int n_piani);
-
-double trova_max_assoluto(const double *data, int n);
 
 int main(int argc, char *argv[]) {
     
@@ -101,30 +89,13 @@ int main(int argc, char *argv[]) {
     fclose(fp);
     printf("Letti %d campioni (%.2f s)\n", n_samples, n_samples * dt);
     
-    // Allocazione buffer temporaneo per filtri
-    double *acc_temp = (double*)malloc(MAX_SAMPLES * sizeof(double));
-    if (!acc_temp) {
-        printf("Errore: impossibile allocare memoria per acc_temp\n");
-        free(acc);
-        free(acc_filt);
-        free(vel);
-        free(disp);
-        return 1;
-    }
+    printf("Applicazione filtro band-pass su accelerazione...\n");
+    double f_low = 0.075;
+    double f_high = 1.0;
+    double a0_bp, a1_bp, a2_bp, b1_bp, b2_bp;
     
-    printf("Applicazione filtro high-pass su accelerazione...\n");
-    double fc_hp = 0.075;
-    double a0_hp, a1_hp, a2_hp, b1_hp, b2_hp;
-    
-    calcola_coeff_highpass(fs, fc_hp, &a0_hp, &a1_hp, &a2_hp, &b1_hp, &b2_hp);
-    filtro_highpass(acc, acc_temp, n_samples, a0_hp, a1_hp, a2_hp, b1_hp, b2_hp);
-    
-    printf("Applicazione filtro low-pass su accelerazione...\n");
-    double fc_lp = 1.0;
-    double a0_lp, a1_lp, a2_lp, b1_lp, b2_lp;
-    
-    calcola_coeff_lowpass(fs, fc_lp, &a0_lp, &a1_lp, &a2_lp, &b1_lp, &b2_lp);
-    filtro_lowpass(acc_temp, acc_filt, n_samples, a0_lp, a1_lp, a2_lp, b1_lp, b2_lp);
+    calcola_coeff_bandpass(fs, f_low, f_high, &a0_bp, &a1_bp, &a2_bp, &b1_bp, &b2_bp);
+    filtro_bandpass(acc, acc_filt, n_samples, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
 
     printf("Salvataggio accelerazioni filtrate...\n");
     if (salva_accelerazioni_filtrate("acc_filtrata.txt", acc_filt, n_samples) == 0) {
@@ -149,21 +120,30 @@ int main(int argc, char *argv[]) {
         printf("Prima integrazione: acc -> vel...\n");
         integra_trapezi(&acc_filt[trigger_idx], vel, n_post_trigger, dt);
 
-        printf("Applicazione filtro high-pass su velocità...\n");
+        printf("Applicazione filtro band-pass su velocità...\n");
         double *vel_filt = (double*)malloc(n_post_trigger * sizeof(double));
         if (!vel_filt) {
             printf("Errore: impossibile allocare memoria per vel_filt\n");
-            free(acc);
-            free(acc_filt);
-            free(vel);
-            free(disp);
-            free(acc_temp);
+            // Pulizia e uscita
+            free(acc); free(acc_filt); free(vel); free(disp);
             return 1;
         }
-        filtro_highpass(vel, vel_filt, n_post_trigger, a0_hp, a1_hp, a2_hp, b1_hp, b2_hp);
+        filtro_bandpass(vel, vel_filt, n_post_trigger, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
 
         printf("Seconda integrazione: vel_filt -> disp...\n");
-        integra_trapezi(vel_filt, disp, n_post_trigger, dt);
+        double *disp_raw = (double*)malloc(n_post_trigger * sizeof(double));
+        if (!disp_raw) {
+            printf("Errore memoria disp_raw\n");
+            free(vel_filt); free(acc); free(acc_filt); free(vel); free(disp);
+            return 1;
+        }
+        integra_trapezi(vel_filt, disp_raw, n_post_trigger, dt);
+
+        // --- AGGIUNTA FILTRO BDP SU DISPLACEMENT ---
+        printf("Applicazione filtro band-pass su spostamento (rimozione drift)...\n");
+        filtro_bandpass(disp_raw, disp, n_post_trigger, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
+        free(disp_raw);
+        // --------------------------------------------
         
         printf("Salvataggio velocità e spostamenti...\n");
         if (salva_integrazioni("integrazioni.txt", vel_filt, disp, n_post_trigger) == 0) {
@@ -172,7 +152,6 @@ int main(int argc, char *argv[]) {
             printf("ATTENZIONE: errore nel salvataggio delle integrazioni\n");
         }
         
-        // CORREZIONE: Trova picco massimo
         double drift_max = 0.0;
         int picco_idx = 0;
         for (int i = 0; i < n_post_trigger; i++) {
@@ -183,7 +162,6 @@ int main(int argc, char *argv[]) {
             }
         }
         
-        // CORREZIONE: Simula valutazione real-time per trovare quando scatta allarme
         int allarme_idx = -1;
         for (int i = 0; i < n_post_trigger; i++) {
             double drift_corrente = fabs(disp[i]);
@@ -211,18 +189,6 @@ int main(int argc, char *argv[]) {
     free(acc_filt);
     free(vel);
     free(disp);
-    free(acc_temp);
     
     return trigger_found ? 0 : 1;
-}
-
-double trova_max_assoluto(const double *data, int n) {
-    double max_val = 0.0;
-    for (int i = 0; i < n; i++) {
-        double abs_val = fabs(data[i]);
-        if (abs_val > max_val) {
-            max_val = abs_val;
-        }
-    }
-    return max_val;
 }
