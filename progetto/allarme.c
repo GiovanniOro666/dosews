@@ -6,206 +6,128 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define SIGMA 0.15  // deviazione standard del modello
+// --- COSTANTI DI REGRESSIONE (Tabella 1 del Paper) ---
+// Queste costanti definiscono la relazione: log10(Drift) = a + b * log10(PGD)
+#define SIGMA 0.15          // Deviazione standard dell'errore di previsione
+#define REG_INTERCEPT -1.01 // Parametro 'a'
+#define REG_SLOPE 0.59      // Parametro 'b'
 
+// --- STRUTTURE DATI ---
+// Struttura per le soglie di danno e probabilità ottimali (Tabella 2 del paper)
 typedef struct {
-    double mds;  // Moderate Damage State
-    double eds;  // Extensive Damage State
-    double cds;  // Complete Damage State
-} SoglieDrift;
+    double mds, eds, cds;           // Soglie fisiche di drift (metri)
+    double p_mds, p_eds, p_cds;     // Soglie di probabilità ottimali (%) per minimizzare falsi allarmi
+} ConfigurazioneAllarme;
 
-const SoglieDrift SOGLIE_RC_LOW = {0.0184, 0.0301, 0.0451};
-const SoglieDrift SOGLIE_RC_MID = {0.0223, 0.0449, 0.0674};
-const SoglieDrift SOGLIE_URM_REG_LOW = {0.0028, 0.0138, 0.0236};
-const SoglieDrift SOGLIE_URM_REG_MID = {0.0062, 0.0219, 0.0350};
-const SoglieDrift SOGLIE_URM_STONE_LOW = {0.0019, 0.0085, 0.0140};
-const SoglieDrift SOGLIE_URM_STONE_MID = {0.0042, 0.0135, 0.0210};
+// --- DATABASE TIPOLOGIE EDILIZIE (Valori ottimali dal Paper) ---
+const ConfigurazioneAllarme CONF_RC_LOW = {0.0184, 0.0301, 0.0451, 20.86, 15.53, 16.52};
+const ConfigurazioneAllarme CONF_RC_MID = {0.0223, 0.0449, 0.0674, 17.20, 16.60, 10.46};
+const ConfigurazioneAllarme CONF_URM_REG_LOW = {0.0028, 0.0138, 0.0236, 13.11, 12.63, 19.70};
+const ConfigurazioneAllarme CONF_URM_REG_MID = {0.0062, 0.0219, 0.0350, 26.46, 17.28, 13.55};
+const ConfigurazioneAllarme CONF_URM_STONE_LOW = {0.0019, 0.0085, 0.0140, 17.75, 20.27, 12.82};
+const ConfigurazioneAllarme CONF_URM_STONE_MID = {0.0042, 0.0135, 0.0210, 36.82, 12.36, 18.30};
 
-const double PROB_THRESH_RC_LOW[3] = {20.86, 15.53, 16.52};
-const double PROB_THRESH_RC_MID[3] = {17.20, 16.60, 10.46};
-const double PROB_THRESH_URM_REG_LOW[3] = {13.11, 12.63, 19.70};
-const double PROB_THRESH_URM_REG_MID[3] = {26.46, 17.28, 13.55};
-const double PROB_THRESH_URM_STONE_LOW[3] = {17.75, 20.27, 12.82};
-const double PROB_THRESH_URM_STONE_MID[3] = {36.82, 12.36, 18.30};
+/**
+ * Calcola la probabilità di superamento di una soglia di danno.
+ * Utilizza la distribuzione log-normale dei dati di drift.
+ */
+double calcola_probabilita_previsiva(double pgd_3s, double soglia_fisica) {
+    if (pgd_3s <= 0) return 0.0;
 
-double calcola_probabilita_eccedenza(double drift_osservato, double soglia_drift) {
+    // 1. Calcolo del Drift mediano atteso in scala logaritmica
+    double log10_drift_predetto = REG_INTERCEPT + REG_SLOPE * log10(pgd_3s);
     
-    double log10_drift_oss = log10(drift_osservato);
-    double log10_soglia = log10(soglia_drift);
+    // 2. Calcolo dello Z-score rispetto alla soglia dell'edificio
+    double log10_soglia = log10(soglia_fisica);
+    double z = (log10_soglia - log10_drift_predetto) / SIGMA;
+
+    // 3. Calcolo della probabilità di eccedenza (Complemento della CDF normale)
+    // Usiamo la funzione di errore erf() per calcolare l'area della coda
+    double prob = 0.5 * (1.0 - erf(z / sqrt(2.0)));
     
-    double z = (log10_soglia - log10_drift_oss) / SIGMA;
-    
-    // CDF normale standard: Φ(z) = 0.5 * (1 + erf(z/√2))
-    double cdf = 0.5 * (1.0 + erf(z / sqrt(2.0)));
-    
-    return (1.0 - cdf) * 100.0;  // ritorna percentuale
+    return prob * 100.0; // Restituisce valore in percentuale (0-100)
 }
 
-// Funzione per valutazione senza I/O (usata nel loop real-time)
-int valuta_allarme_istantaneo(double drift_corrente, const char *tipologia, int n_piani) {
-    
-    SoglieDrift soglie;
-    const double *prob_thresh;
-    
+/**
+ * Valuta istantaneamente il livello di allarme confrontando le probabilità
+ * calcolate con le soglie ottimali derivate dal paper.
+ */
+int valuta_allarme_istantaneo(double pgd_3s, const char *tipologia, int n_piani) {
+    ConfigurazioneAllarme c;
+
+    // Selezione del profilo di vulnerabilità dell'edificio
     if (strcmp(tipologia, "RC") == 0) {
-        if (n_piani <= 3) {
-            soglie = SOGLIE_RC_LOW;
-            prob_thresh = PROB_THRESH_RC_LOW;
-        } else {
-            soglie = SOGLIE_RC_MID;
-            prob_thresh = PROB_THRESH_RC_MID;
-        }
+        c = (n_piani <= 3) ? CONF_RC_LOW : CONF_RC_MID;
     } else if (strcmp(tipologia, "URM_REG") == 0) {
-        if (n_piani <= 2) {
-            soglie = SOGLIE_URM_REG_LOW;
-            prob_thresh = PROB_THRESH_URM_REG_LOW;
-        } else {
-            soglie = SOGLIE_URM_REG_MID;
-            prob_thresh = PROB_THRESH_URM_REG_MID;
-        }
-    } else {
-        if (n_piani <= 2) {
-            soglie = SOGLIE_URM_STONE_LOW;
-            prob_thresh = PROB_THRESH_URM_STONE_LOW;
-        } else {
-            soglie = SOGLIE_URM_STONE_MID;
-            prob_thresh = PROB_THRESH_URM_STONE_MID;
-        }
+        c = (n_piani <= 2) ? CONF_URM_REG_LOW : CONF_URM_REG_MID;
+    } else { // URM_STONE
+        c = (n_piani <= 2) ? CONF_URM_STONE_LOW : CONF_URM_STONE_MID;
     }
-    
-    double prob_mds = calcola_probabilita_eccedenza(drift_corrente, soglie.mds);
-    double prob_eds = calcola_probabilita_eccedenza(drift_corrente, soglie.eds);
-    double prob_cds = calcola_probabilita_eccedenza(drift_corrente, soglie.cds);
-    
-    if (prob_cds >= prob_thresh[2]) return 3;
-    if (prob_eds >= prob_thresh[1]) return 2;
-    if (prob_mds >= prob_thresh[0]) return 1;
-    return 0;
+
+    // Calcolo delle probabilità previsive per i tre stati di danno (MDS, EDS, CDS)
+    double p_mds_calc = calcola_probabilita_previsiva(pgd_3s, c.mds);
+    double p_eds_calc = calcola_probabilita_previsiva(pgd_3s, c.eds);
+    double p_cds_calc = calcola_probabilita_previsiva(pgd_3s, c.cds);
+
+    // Decisione bayesiana: si parte dal danno più grave
+    if (p_cds_calc >= c.p_cds) return 3; // ROSSO: Danno Completo previsto
+    if (p_eds_calc >= c.p_eds) return 2; // ARANCIO: Danno Esteso previsto
+    if (p_mds_calc >= c.p_mds) return 1; // GIALLO: Danno Moderato previsto
+
+    return 0; // NESSUN ALLARME
 }
 
-int valuta_allarme(double drift_max, const char *tipologia, int n_piani, 
-                   int trigger_idx, int allarme_idx, int picco_idx, double fs) {
+/**
+ * Funzione di reportistica chiamata dal main.
+ * Stampa a video i dettagli della decisione e salva i risultati su file.
+ */
+int valuta_allarme(double pgd_3s, const char *tipologia, int n_piani, 
+                   int trigger_idx, double fs, double drift_reale_max) {
     
-    double tempo_trigger = trigger_idx / fs;
-    double tempo_allarme = (trigger_idx + allarme_idx) / fs;
-    double tempo_picco = (trigger_idx + picco_idx) / fs;
-    double tempo_lancio_allarme = allarme_idx / fs;
-    double lead_time = (picco_idx - allarme_idx) / fs;
-    
-    printf("\n=== VALUTAZIONE ALLARME ===\n");
-    printf("Trigger: campione %d, tempo %.3f s\n", trigger_idx, tempo_trigger);
-    printf("Allarme: campione %d, tempo %.3f s\n", trigger_idx + allarme_idx, tempo_allarme);
-    printf("Picco:   campione %d, tempo %.3f s\n", trigger_idx + picco_idx, tempo_picco);
-    printf("\nTempo lancio allarme: %.3f s (%d campioni)\n", tempo_lancio_allarme, allarme_idx);
-    printf("Lead time: %.3f s (%d campioni)\n", lead_time, picco_idx - allarme_idx);
-    printf("\nDrift massimo: %.6e m\n", drift_max);
-    printf("Tipologia: %s, Piani: %d\n", tipologia, n_piani);
-    
-    // Apri file per salvare info allarme
-    FILE *fp_allarme = fopen("allarme_info.txt", "w");
-    if (fp_allarme) {
-        fprintf(fp_allarme, "=== INFORMAZIONI ALLARME ===\n");
-        fprintf(fp_allarme, "Trigger: campione %d, tempo %.3f s\n", trigger_idx, tempo_trigger);
-        fprintf(fp_allarme, "Allarme: campione %d, tempo %.3f s\n", trigger_idx + allarme_idx, tempo_allarme);
-        fprintf(fp_allarme, "Picco:   campione %d, tempo %.3f s\n", trigger_idx + picco_idx, tempo_picco);
-        fprintf(fp_allarme, "\nTempo lancio allarme: %.3f s (%d campioni)\n", tempo_lancio_allarme, allarme_idx);
-        fprintf(fp_allarme, "Lead time: %.3f s (%d campioni)\n", lead_time, picco_idx - allarme_idx);
-        fprintf(fp_allarme, "\nDrift massimo: %.6e m\n", drift_max);
-        fprintf(fp_allarme, "Tipologia: %s, Piani: %d\n\n", tipologia, n_piani);
-    }
-    
-    // Seleziona soglie appropriate
-    SoglieDrift soglie;
-    const double *prob_thresh;
-    
+    ConfigurazioneAllarme c;
     if (strcmp(tipologia, "RC") == 0) {
-        if (n_piani <= 3) {
-            soglie = SOGLIE_RC_LOW;
-            prob_thresh = PROB_THRESH_RC_LOW;
-        } else {
-            soglie = SOGLIE_RC_MID;
-            prob_thresh = PROB_THRESH_RC_MID;
-        }
+        c = (n_piani <= 3) ? CONF_RC_LOW : CONF_RC_MID;
     } else if (strcmp(tipologia, "URM_REG") == 0) {
-        if (n_piani <= 2) {
-            soglie = SOGLIE_URM_REG_LOW;
-            prob_thresh = PROB_THRESH_URM_REG_LOW;
-        } else {
-            soglie = SOGLIE_URM_REG_MID;
-            prob_thresh = PROB_THRESH_URM_REG_MID;
-        }
+        c = (n_piani <= 2) ? CONF_URM_REG_LOW : CONF_URM_REG_MID;
     } else {
-        if (n_piani <= 2) {
-            soglie = SOGLIE_URM_STONE_LOW;
-            prob_thresh = PROB_THRESH_URM_STONE_LOW;
-        } else {
-            soglie = SOGLIE_URM_STONE_MID;
-            prob_thresh = PROB_THRESH_URM_STONE_MID;
-        }
+        c = (n_piani <= 2) ? CONF_URM_STONE_LOW : CONF_URM_STONE_MID;
     }
+
+    double p_mds = calcola_probabilita_previsiva(pgd_3s, c.mds);
+    double p_eds = calcola_probabilita_previsiva(pgd_3s, c.eds);
+    double p_cds = calcola_probabilita_previsiva(pgd_3s, c.cds);
+
+    int livello = valuta_allarme_istantaneo(pgd_3s, tipologia, n_piani);
+    const char* colori[] = {"NESSUNO", "GIALLO (Moderato)", "ARANCIO (Esteso)", "ROSSO (Completo)"};
+
+    // Output a console per l'operatore
+    printf("\n===============================================\n");
+    printf("   EARLY WARNING SYSTEM - ANALISI BAYESIANA    \n");
+    printf("===============================================\n");
+    printf("Trigger rilevato a: %.3f secondi\n", trigger_idx / fs);
+    printf("PGD (primi 3s):     %.6e m\n", pgd_3s);
+    printf("Drift Mediano previsto: %.6e m\n", pow(10.0, REG_INTERCEPT + REG_SLOPE * log10(pgd_3s)));
     
-    // Calcola probabilità eccedenza per ogni livello danno
-    double prob_mds = calcola_probabilita_eccedenza(drift_max, soglie.mds);
-    double prob_eds = calcola_probabilita_eccedenza(drift_max, soglie.eds);
-    double prob_cds = calcola_probabilita_eccedenza(drift_max, soglie.cds);
+    printf("\nPROBABILITA' DI ECCEDENZA VS SOGLIE:\n");
+    printf("  Soglia MDS: %5.2f%% (Target: %5.2f%%)\n", p_mds, c.p_mds);
+    printf("  Soglia EDS: %5.2f%% (Target: %5.2f%%)\n", p_eds, c.p_eds);
+    printf("  Soglia CDS: %5.2f%% (Target: %5.2f%%)\n", p_cds, c.p_cds);
+
+    printf("\n>>> LIVELLO ALLARME: %s <<<\n", colori[livello]);
     
-    printf("\nProbabilità eccedenza:\n");
-    printf("  MDS (%.4f m): %.2f%% (soglia: %.2f%%)\n", 
-           soglie.mds, prob_mds, prob_thresh[0]);
-    printf("  EDS (%.4f m): %.2f%% (soglia: %.2f%%)\n", 
-           soglie.eds, prob_eds, prob_thresh[1]);
-    printf("  CDS (%.4f m): %.2f%% (soglia: %.2f%%)\n", 
-           soglie.cds, prob_cds, prob_thresh[2]);
-    
-    if (fp_allarme) {
-        fprintf(fp_allarme, "Probabilità eccedenza:\n");
-        fprintf(fp_allarme, "  MDS (%.4f m): %.2f%% (soglia: %.2f%%)\n", 
-                soglie.mds, prob_mds, prob_thresh[0]);
-        fprintf(fp_allarme, "  EDS (%.4f m): %.2f%% (soglia: %.2f%%)\n", 
-                soglie.eds, prob_eds, prob_thresh[1]);
-        fprintf(fp_allarme, "  CDS (%.4f m): %.2f%% (soglia: %.2f%%)\n\n", 
-                soglie.cds, prob_cds, prob_thresh[2]);
+    if (drift_reale_max > 0) {
+        printf("Validazione post-evento (Drift Max): %.6e m\n", drift_reale_max);
     }
-    
-    int allarme = 0;
-    
-    if (prob_cds >= prob_thresh[2]) {
-        printf("\n*** ALLARME ROSSO ***\n");
-        printf("DANNO COMPLETO\n");
-        allarme = 3;
-        if (fp_allarme) {
-            fprintf(fp_allarme, "*** ALLARME ROSSO ***\n");
-            fprintf(fp_allarme, "DANNO COMPLETO\n");
-        }
-    } else if (prob_eds >= prob_thresh[1]) {
-        printf("\n*** ALLARME ROSSO ***\n");
-        printf("DANNO ESTESO\n");
-        allarme = 2;
-        if (fp_allarme) {
-            fprintf(fp_allarme, "*** ALLARME ROSSO ***\n");
-            fprintf(fp_allarme, "DANNO ESTESO\n");
-        }
-    } else if (prob_mds >= prob_thresh[0]) {
-        printf("\n*** ALLARME ROSSO ***\n");
-        printf("DANNO MODERATO PROBABILE\n");
-        allarme = 1;
-        if (fp_allarme) {
-            fprintf(fp_allarme, "*** ALLARME ROSSO ***\n");
-            fprintf(fp_allarme, "DANNO MODERATO PROBABILE\n");
-        }
-    } else {
-        printf("\n*** NESSUN ALLARME ***\n");
-        printf("Probabilità danno sotto soglia\n");
-        if (fp_allarme) {
-            fprintf(fp_allarme, "*** NESSUN ALLARME ***\n");
-            fprintf(fp_allarme, "Probabilità danno sotto soglia\n");
-        }
+    printf("===============================================\n");
+
+    // Salvataggio persistente per analisi post-evento
+    FILE *fp = fopen("allarme_report.txt", "w");
+    if (fp) {
+        fprintf(fp, "PGD_3s: %.6e\n", pgd_3s);
+        fprintf(fp, "Livello_Allarme: %d\n", livello);
+        fprintf(fp, "Prob_MDS: %.2f\nProb_EDS: %.2f\nProb_CDS: %.2f\n", p_mds, p_eds, p_cds);
+        fclose(fp);
     }
-    
-    if (fp_allarme) {
-        fclose(fp_allarme);
-        printf("\nInformazioni allarme salvate in 'allarme_info.txt'\n");
-    }
-    
-    return allarme;
+
+    return livello;
 }

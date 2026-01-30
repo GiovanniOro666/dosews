@@ -1,194 +1,249 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <string.h>
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 #define MAX_SAMPLES 500000
 #define STA_SEC 0.5
 #define LTA_SEC 6.0
 #define THRESHOLD 4.0
+#define EEW_WINDOW_SEC 3.0 
 
-void calcola_coeff_bandpass(double fs, double f_low, double f_high,
-                            double *a0, double *a1, double *a2,
-                            double *b1, double *b2);
-
-void filtro_bandpass(const double *in, double *out, int n,
-                     double a0, double a1, double a2,
-                     double b1, double b2);
-
-int rileva_trigger(const double *acc_fir, int n_samples, double fs,
-                   double sta_sec, double lta_sec, double threshold,
-                   int start_idx, int *trigger_idx);
-
-int salva_accelerazioni_filtrate(const char *filename, const double *acc_filtrate, int n);
-
+// --- PROTOTIPI FUNZIONI ESTERNE ---
+int rileva_trigger(const double *acc_filt, int n_samples, double fs, double sta_sec, double lta_sec, double threshold, int start_idx, int *trigger_idx);
 void integra_trapezi(const double *in, double *out, int n, double dt);
-
-int salva_integrazioni(const char *filename, const double *vel, 
-                       const double *disp, int n);
-
-int valuta_allarme(double drift_max, const char *tipologia, int n_piani, 
-                   int trigger_idx, int allarme_idx, int picco_idx, double fs);
-
-int valuta_allarme_istantaneo(double drift_corrente, const char *tipologia, int n_piani);
+void rimuovi_trend_lineare(double *data, int n);
+int salva_accelerazioni_filtrate(const char *filename, const double *acc_filtrate, int n);
+int salva_integrazioni(const char *filename, const double *vel, const double *disp, int n);
+int valuta_allarme(double pgd_3s, const char *tipologia, int n_piani, int trigger_idx, double fs, double drift_reale_max);
+int valuta_allarme_istantaneo(double pgd_3s, const char *tipologia, int n_piani);
+void calcola_coeff_bandpass(double fs, double f_low, double f_high, double *a0, double *a1, double *a2, double *b1, double *b2);
+void filtro_bandpass(const double *in, double *out, int n, double a0, double a1, double a2, double b1, double b2);
 
 int main(int argc, char *argv[]) {
-    
-    double *acc;
-    double *acc_filt;
-    double *vel;
-    double *disp;
-    
-    int n_samples = 0;
-    double fs, dt;
-    int lta_len;
-    
-    acc = (double*)malloc(MAX_SAMPLES * sizeof(double));
-    acc_filt = (double*)malloc(MAX_SAMPLES * sizeof(double));
-    vel = (double*)malloc(MAX_SAMPLES * sizeof(double));
-    disp = (double*)malloc(MAX_SAMPLES * sizeof(double));
-    
-    if (!acc || !acc_filt || !vel || !disp) {
-        printf("Errore: impossibile allocare memoria\n");
-        return 1;
-    }
-    
     if (argc != 5) {
-        printf("Utilizzo: %s <file_input> <frequenza> <tipologia> <n_piani>\n", argv[0]);
-        printf("Esempio: %s dati.txt 100 RC 3\n", argv[0]);
-        printf("Tipologie: RC, URM_REG, URM_STONE\n");
+        printf("Utilizzo: %s <file_input> <frequenza> <tipologia: RC|URM_REG|URM_STONE> <n_piani>\n", argv[0]);
         return 1;
     }
-    
+
     char *filename = argv[1];
-    fs = atof(argv[2]);
+    double fs = atof(argv[2]);
     char *tipologia = argv[3];
     int n_piani = atoi(argv[4]);
-    dt = 1.0 / fs;
-    
-    int sta_len = (int)(STA_SEC * fs);
-    lta_len = (int)(LTA_SEC * fs);
-    
-    printf("=== CONFIGURAZIONE SISTEMA ===\n");
-    printf("Edificio: %s, %d piani\n", tipologia, n_piani);
-    printf("Frequenza campionamento: %.1f Hz (dt=%.4f s)\n", fs, dt);
-    printf("STA: %d campioni (%.1f s)\n", sta_len, STA_SEC);
-    printf("LTA: %d campioni (%.1f s)\n", lta_len, LTA_SEC);
-    printf("Soglia STA/LTA: %.1f\n\n", THRESHOLD);
-    
-    printf("Lettura dati da %s...\n", filename);
-    FILE *fp = fopen(filename, "r");
-    if (!fp) {
-        printf("Errore: impossibile aprire il file\n");
+    double dt = 1.0 / fs;
+
+    double *acc = malloc(MAX_SAMPLES * sizeof(double));
+    double *acc_filt = malloc(MAX_SAMPLES * sizeof(double));
+
+    if (!acc || !acc_filt) {
+        printf("Errore: Memoria insufficiente.\n");
         return 1;
     }
-    
+
+    int n_samples = 0;
+    FILE *fp = fopen(filename, "r");
+    if (!fp) { printf("Errore: impossibile aprire %s\n", filename); return 1; }
     while (fscanf(fp, "%lf", &acc[n_samples]) == 1 && n_samples < MAX_SAMPLES) {
-        acc[n_samples] *= 9.80665;
         n_samples++;
     }
     fclose(fp);
-    printf("Letti %d campioni (%.2f s)\n", n_samples, n_samples * dt);
-    
-    printf("Applicazione filtro band-pass su accelerazione...\n");
-    double f_low = 0.075;
-    double f_high = 1.0;
+
+    // --- FILTRO BAND-PASS INVECE DI HP+LP ---
     double a0_bp, a1_bp, a2_bp, b1_bp, b2_bp;
+    calcola_coeff_bandpass(fs, 0.075, 1.0, &a0_bp, &a1_bp, &a2_bp, &b1_bp, &b2_bp);
     
-    calcola_coeff_bandpass(fs, f_low, f_high, &a0_bp, &a1_bp, &a2_bp, &b1_bp, &b2_bp);
     filtro_bandpass(acc, acc_filt, n_samples, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
-
-    printf("Salvataggio accelerazioni filtrate...\n");
+    
+    // Conversione da g a m/s²
+    for (int i = 0; i < n_samples; i++) acc_filt[i] *= 9.80665;
+    
     if (salva_accelerazioni_filtrate("acc_filtrata.txt", acc_filt, n_samples) == 0) {
-        printf("Accelerazioni filtrate salvate in 'acc_filtrata.txt'\n");
+        printf("Segnale filtrato salvato correttamente in 'acc_filtrata.txt'\n");
     } else {
-        printf("ATTENZIONE: errore nel salvataggio delle accelerazioni filtrate\n");
+        printf("Avviso: Errore durante il salvataggio del segnale filtrato.\n");
     }
-    
-    printf("Calcolo STA/LTA...\n");
-    
-    int start_idx = lta_len - 1;
+
     int trigger_idx;
-    int trigger_found = rileva_trigger(acc_filt, n_samples, fs,
-                                       STA_SEC, LTA_SEC, THRESHOLD,
-                                       start_idx, &trigger_idx);
-    
-    if (trigger_found) {
-        printf("\nIntegrazione a partire dal trigger (indice %d)...\n", trigger_idx);
+    int offset_iniziale = (int)(LTA_SEC * fs);
+
+    if (rileva_trigger(acc_filt, n_samples, fs, STA_SEC, LTA_SEC, THRESHOLD, offset_iniziale, &trigger_idx)) {
         
+        double tempo_trigger = (double)trigger_idx / fs;
+        printf("\n>>>> MONITORAGGIO CONTINUO ATTIVATO <<<<\n");
+        printf("Trigger rilevato a: %.3f s (indice %d)\n", tempo_trigger, trigger_idx);
+        
+        // --- INTEGRAZIONE COMPLETA POST-TRIGGER ---
         int n_post_trigger = n_samples - trigger_idx;
-        
-        printf("Prima integrazione: acc -> vel...\n");
+        double *vel = calloc(n_post_trigger, sizeof(double));
+        double *disp = calloc(n_post_trigger, sizeof(double));
+        double *temp = calloc(n_post_trigger, sizeof(double));
+
+        if (!vel || !disp || !temp) {
+            printf("Errore: memoria insufficiente\n");
+            free(acc); free(acc_filt);
+            return 1;
+        }
+
+        // Prima integrazione: acc -> vel
         integra_trapezi(&acc_filt[trigger_idx], vel, n_post_trigger, dt);
+        filtro_bandpass(vel, temp, n_post_trigger, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
+        memcpy(vel, temp, n_post_trigger * sizeof(double));
 
-        printf("Applicazione filtro band-pass su velocità...\n");
-        double *vel_filt = (double*)malloc(n_post_trigger * sizeof(double));
-        if (!vel_filt) {
-            printf("Errore: impossibile allocare memoria per vel_filt\n");
-            // Pulizia e uscita
-            free(acc); free(acc_filt); free(vel); free(disp);
-            return 1;
-        }
-        filtro_bandpass(vel, vel_filt, n_post_trigger, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
+        // Seconda integrazione: vel -> disp
+        integra_trapezi(vel, disp, n_post_trigger, dt);
+        filtro_bandpass(disp, temp, n_post_trigger, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
+        memcpy(disp, temp, n_post_trigger * sizeof(double));
 
-        printf("Seconda integrazione: vel_filt -> disp...\n");
-        double *disp_raw = (double*)malloc(n_post_trigger * sizeof(double));
-        if (!disp_raw) {
-            printf("Errore memoria disp_raw\n");
-            free(vel_filt); free(acc); free(acc_filt); free(vel); free(disp);
-            return 1;
-        }
-        integra_trapezi(vel_filt, disp_raw, n_post_trigger, dt);
+        salva_integrazioni("integrazioni.txt", vel, disp, n_post_trigger);
 
-        // --- AGGIUNTA FILTRO BDP SU DISPLACEMENT ---
-        printf("Applicazione filtro band-pass su spostamento (rimozione drift)...\n");
-        filtro_bandpass(disp_raw, disp, n_post_trigger, a0_bp, a1_bp, a2_bp, b1_bp, b2_bp);
-        free(disp_raw);
-        // --------------------------------------------
-        
-        printf("Salvataggio velocità e spostamenti...\n");
-        if (salva_integrazioni("integrazioni.txt", vel_filt, disp, n_post_trigger) == 0) {
-            printf("Integrazioni salvate in 'integrazioni.txt' (%d campioni)\n", n_post_trigger);
-        } else {
-            printf("ATTENZIONE: errore nel salvataggio delle integrazioni\n");
-        }
-        
+        // --- PRE-CALCOLO: TROVA IL PICCO MASSIMO DEL DRIFT ---
         double drift_max = 0.0;
-        int picco_idx = 0;
+        int idx_drift_max = 0;
         for (int i = 0; i < n_post_trigger; i++) {
-            double abs_val = fabs(disp[i]);
-            if (abs_val > drift_max) {
-                drift_max = abs_val;
-                picco_idx = i;
+            if (fabs(disp[i]) > drift_max) {
+                drift_max = fabs(disp[i]);
+                idx_drift_max = i;
             }
         }
+        double tempo_drift_max = (trigger_idx + idx_drift_max) / fs;
         
-        int allarme_idx = -1;
-        for (int i = 0; i < n_post_trigger; i++) {
-            double drift_corrente = fabs(disp[i]);
-            int livello = valuta_allarme_istantaneo(drift_corrente, tipologia, n_piani);
-            if (livello > 0) {
-                allarme_idx = i;
-                break;
-            }
-        }
+        printf("Pre-analisi: Drift massimo = %.6e m al tempo %.3f s\n", drift_max, tempo_drift_max);
+
+        // --- MONITORAGGIO CONTINUO CON FINESTRA MOBILE 3s ---
+        // CERCA IL LIVELLO MASSIMO, NON SI FERMA AL PRIMO ALLARME
+        int n_eew = (int)(EEW_WINDOW_SEC * fs);
+        int livello_massimo = 0;
+        double pgd_massimo = 0.0;
+        int idx_allarme_max = -1;
+        int primo_allarme_emesso = 0;
+        int idx_primo_allarme = -1;
+        double pgd_primo_allarme = 0.0;
         
-        if (allarme_idx >= 0) {
-            printf("\nDrift massimo: %.6e m (indice %d)\n", drift_max, picco_idx);
+        printf("Valutazione con finestra mobile di %.1f secondi...\n", EEW_WINDOW_SEC);
+        printf("(Continuo fino alla fine per trovare livello massimo)\n\n");
+        
+        // Scorri TUTTE le posizioni possibili della finestra di 3s
+        for (int i = 0; i <= n_post_trigger - n_eew; i++) {
             
-            int livello_allarme = valuta_allarme(drift_max, tipologia, n_piani, 
-                                                 trigger_idx, allarme_idx, picco_idx, fs);
-        } else {
-            printf("\nNessun allarme scattato\n");
-            printf("Drift massimo: %.6e m\n", drift_max);
+            // Calcola PGD nella finestra corrente [i, i+n_eew]
+            double pgd_window = 0.0;
+            for (int j = i; j < i + n_eew; j++) {
+                if (fabs(disp[j]) > pgd_window) {
+                    pgd_window = fabs(disp[j]);
+                }
+            }
+            
+            // Valuta livello di allarme per questa finestra
+            int livello = valuta_allarme_istantaneo(pgd_window, tipologia, n_piani);
+            
+            // Registra il PRIMO allarme emesso (qualsiasi livello > 0)
+            if (livello > 0 && !primo_allarme_emesso) {
+                primo_allarme_emesso = 1;
+                idx_primo_allarme = i + n_eew;
+                pgd_primo_allarme = pgd_window;
+                
+                double tempo_allarme = (trigger_idx + idx_primo_allarme) / fs;
+                double lead_time = tempo_drift_max - tempo_allarme;
+                
+                const char* nomi[] = {"NESSUNO", "GIALLO (Moderato)", "ARANCIO (Esteso)", "ROSSO (Completo)"};
+                printf("*** PRIMO ALLARME EMESSO! ***\n");
+                printf("Tempo: %.3f s (%.3f s dopo trigger)\n", 
+                       tempo_allarme, idx_primo_allarme/fs);
+                printf("PGD finestra: %.6e m\n", pgd_window);
+                printf("Livello: %d - %s\n", livello, nomi[livello]);
+                if (lead_time > 0) {
+                    printf("LEAD TIME disponibile: %.3f s ✓ (tempo prima del picco)\n\n", lead_time);
+                } else {
+                    printf("LEAD TIME disponibile: %.3f s (picco già passato)\n\n", lead_time);
+                }
+            }
+            
+            // Aggiorna il livello MASSIMO raggiunto
+            if (livello > livello_massimo) {
+                livello_massimo = livello;
+                pgd_massimo = pgd_window;
+                idx_allarme_max = i + n_eew;
+                
+                double tempo_allarme = (trigger_idx + idx_allarme_max) / fs;
+                double lead_time = tempo_drift_max - tempo_allarme;
+                
+                const char* nomi[] = {"NESSUNO", "GIALLO (Moderato)", "ARANCIO (Esteso)", "ROSSO (Completo)"};
+                printf(">>> ALLARME AGGIORNATO! <<<\n");
+                printf("Tempo: %.3f s (%.3f s dopo trigger)\n", 
+                       tempo_allarme, idx_allarme_max/fs);
+                printf("PGD finestra: %.6e m\n", pgd_window);
+                printf("Livello: %d - %s\n", livello, nomi[livello]);
+                if (lead_time > 0) {
+                    printf("LEAD TIME disponibile: %.3f s ✓ (tempo prima del picco)\n\n", lead_time);
+                } else {
+                    printf("LEAD TIME disponibile: %.3f s (picco già passato)\n\n", lead_time);
+                }
+            }
+            
+            // Debug ogni secondo (senza sovrascrivere gli aggiornamenti)
+            if (i % (int)fs == 0 && livello == livello_massimo && livello > 0) {
+                printf("  [t=%.1fs: PGD=%.6e m, livello=%d]\n", i/fs, pgd_window, livello);
+            }
         }
         
-        free(vel_filt);
+        // Se nessun allarme è stato mai emesso
+        if (livello_massimo == 0) {
+            printf("\nNessuna soglia superata durante il monitoraggio.\n");
+            // Usa il PGD massimo trovato comunque per il report
+            for (int i = 0; i < n_post_trigger; i++) {
+                if (fabs(disp[i]) > pgd_massimo) {
+                    pgd_massimo = fabs(disp[i]);
+                }
+            }
+            idx_allarme_max = n_post_trigger;
+        }
+
+        printf("\n>>>> STATISTICHE TEMPORALI <<<<\n");
+        printf("Tempo Trigger:           %.3f s\n", tempo_trigger);
+        
+        if (primo_allarme_emesso) {
+            double tempo_primo_allarme = (trigger_idx + idx_primo_allarme) / fs;
+            printf("Tempo PRIMO Allarme:     %.3f s\n", tempo_primo_allarme);
+        }
+        
+        if (livello_massimo > 0) {
+            double tempo_allarme_max = (trigger_idx + idx_allarme_max) / fs;
+            double tempo_drift_max = (trigger_idx + idx_drift_max) / fs;
+            double lead_time = tempo_drift_max - tempo_allarme_max;
+            
+            printf("Tempo Allarme MASSIMO:   %.3f s\n", tempo_allarme_max);
+            printf("Tempo Picco Drift:       %.3f s\n", tempo_drift_max);
+            
+            if (lead_time > 0) {
+                printf("LEAD TIME:               %.3f s ✓\n", lead_time);
+            } else {
+                printf("LEAD TIME:               %.3f s (BLIND ZONE)\n", lead_time);
+            }
+        } else {
+            printf("Nessun allarme emesso.\n");
+        }
+        
+        printf("\nRISULTATO FINALE:\n");
+        printf("Livello massimo: %d\n", livello_massimo);
+        printf("PGD al livello massimo: %.6e m\n", pgd_massimo);
+        printf("Drift massimo osservato: %.6e m\n", drift_max);
+        printf("--------------------------------\n");
+
+        // Report finale con il PGD del livello MASSIMO
+        valuta_allarme(pgd_massimo, tipologia, n_piani, trigger_idx, fs, drift_max);
+
+        free(vel); 
+        free(disp); 
+        free(temp);
+    } else {
+        printf("Nessun evento rilevato.\n");
     }
-    
-    free(acc);
+
+    free(acc); 
     free(acc_filt);
-    free(vel);
-    free(disp);
-    
-    return trigger_found ? 0 : 1;
+    return 0;
 }
