@@ -17,13 +17,13 @@ int rileva_trigger(double *accelerazione_filtrata, int n_campioni, double freque
     double sta_somma = 0.0;
     for (int i = indice_inizio - sta_lunghezza; i < indice_inizio; i++) {
         double val = accelerazione_filtrata[i];
-        sta_somma += val * val; // <--- MODIFICATO
+        sta_somma += val * val;
     }
     
     double lta_somma = 0.0;
     for (int i = indice_inizio - lta_lunghezza; i < indice_inizio; i++) {
         double val = accelerazione_filtrata[i];
-        lta_somma += val * val; // <--- MODIFICATO
+        lta_somma += val * val;
     }
     
     for (int i = indice_inizio; i < n_campioni; i++) {
@@ -32,15 +32,13 @@ int rileva_trigger(double *accelerazione_filtrata, int n_campioni, double freque
         double out_sta_sq = accelerazione_filtrata[i - sta_lunghezza - 1] * accelerazione_filtrata[i - sta_lunghezza - 1];
         double out_lta_sq = accelerazione_filtrata[i - lta_lunghezza - 1] * accelerazione_filtrata[i - lta_lunghezza - 1];
 
-        // Aggiornamento somme mobili (sliding window)
-        sta_somma += attuale_sq - out_sta_sq; // <--- MODIFICATO
-        lta_somma += attuale_sq - out_lta_sq; // <--- MODIFICATO
+        sta_somma += attuale_sq - out_sta_sq;
+        lta_somma += attuale_sq - out_lta_sq;
         
         double sta_media = sta_somma / sta_lunghezza;
         double lta_media = lta_somma / lta_lunghezza;
         
         double rapporto;
-        // La soglia di tolleranza può essere leggermente più alta per i quadrati (es. 1e-15)
         if (lta_media > 1e-15) {
             rapporto = sta_media / lta_media;
         } else {
